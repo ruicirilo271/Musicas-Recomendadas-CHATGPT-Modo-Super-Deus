@@ -2,6 +2,7 @@
 
 import os
 import json
+import re
 from flask import Flask, render_template, jsonify, request
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -9,17 +10,40 @@ from openai import OpenAI
 
 load_dotenv()
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(BASE_DIR)
+
 app = Flask(
     __name__,
-    template_folder="../templates",
-    static_folder="../static"
+    template_folder=os.path.join(ROOT_DIR, "templates"),
+    static_folder=os.path.join(ROOT_DIR, "static"),
+    static_url_path="/static"
 )
+
 CORS(app)
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip()
 
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
+
+def extract_json(text):
+    if not text:
+        raise ValueError("Resposta vazia da OpenAI.")
+
+    text = text.strip()
+
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+
+    match = re.search(r"\{[\s\S]*\}", text)
+    if not match:
+        raise ValueError("Não foi possível encontrar JSON válido na resposta.")
+
+    return json.loads(match.group(0))
 
 
 @app.route("/")
@@ -42,61 +66,74 @@ def recommendations():
     if not client:
         return jsonify({
             "ok": False,
-            "error": "OPENAI_API_KEY não encontrada. Verifica o ficheiro .env."
+            "error": "OPENAI_API_KEY não encontrada. No Vercel coloca a variável de ambiente OPENAI_API_KEY."
         }), 500
 
     data = request.get_json(silent=True) or {}
 
-    mood = data.get("mood", "").strip()
-    artists = data.get("artists", "").strip()
-    genres = data.get("genres", "").strip()
-    language = data.get("language", "português, inglês, kizomba, pop, soul, R&B").strip()
-    amount = int(data.get("amount", 20))
+    mood = str(data.get("mood", "")).strip()
+    artists = str(data.get("artists", "")).strip()
+    genres = str(data.get("genres", "")).strip()
+    language = str(data.get("language", "")).strip()
+    amount = data.get("amount", 20)
 
-    if amount < 5:
-        amount = 5
+    try:
+        amount = int(amount)
+    except Exception:
+        amount = 20
 
-    if amount > 40:
-        amount = 40
+    amount = max(5, min(amount, 40))
 
-    user_profile = f"""
-Quero recomendações musicais para tocar numa aplicação web.
-
-Preferências:
-- Estado de espírito: {mood or "mistura boa para ouvir sem parar"}
-- Artistas de referência: {artists or "Adele, Rihanna, The Weeknd, Nininho Vaz Maia, Roberto Carlos, Boss AC, Matias Damásio"}
-- Géneros: {genres or "pop, kizomba, R&B, soul, música romântica, música portuguesa"}
-- Idiomas/estilo: {language}
-
-Regras:
-- Recomenda {amount} músicas reais.
-- Evita músicas repetidas.
-- Mistura músicas conhecidas com algumas descobertas.
-- A ordem deve funcionar como uma playlist: começa forte, depois mantém bom ritmo.
-- Cada item deve ter artista, título, motivo curto e uma query boa para procurar no YouTube.
-"""
+    default_artists = "Adele, Rihanna, The Weeknd, Nininho Vaz Maia, Roberto Carlos, Boss AC, Matias Damásio"
+    default_genres = "pop, kizomba, R&B, soul, música romântica, música portuguesa, afro pop"
+    default_mood = "músicas boas para ouvir seguidas, com vibe romântica, moderna e viciante"
+    default_language = "português, inglês, kizomba, pop, soul e R&B"
 
     system_prompt = """
-És um especialista em recomendações musicais.
+És um especialista mundial em recomendações musicais.
+
 Tens de devolver APENAS JSON válido.
 Não uses Markdown.
-Não expliques nada fora do JSON.
+Não uses texto fora do JSON.
+Não inventes músicas impossíveis.
+Recomenda músicas reais.
+A ordem deve funcionar como uma playlist para tocar seguida.
 
 Formato obrigatório:
 
 {
   "playlist_name": "nome criativo da playlist",
-  "description": "descrição curta",
+  "description": "descrição curta da playlist",
   "tracks": [
     {
-      "artist": "Artista",
-      "title": "Título da música",
-      "reason": "Motivo curto",
-      "youtube_query": "Artista Título official music video",
-      "vibe": "romântica / energia / calma / kizomba / pop / etc"
+      "artist": "Nome do artista",
+      "title": "Nome da música",
+      "reason": "Motivo curto da recomendação",
+      "youtube_query": "Nome do artista Nome da música official music video",
+      "vibe": "romântica / energia / calma / kizomba / pop / R&B / etc",
+      "estimated_seconds": 240
     }
   ]
 }
+"""
+
+    user_prompt = f"""
+Cria uma playlist com {amount} músicas recomendadas.
+
+Preferências do utilizador:
+- Estado de espírito: {mood or default_mood}
+- Artistas de referência: {artists or default_artists}
+- Géneros: {genres or default_genres}
+- Idiomas/estilos: {language or default_language}
+
+Regras:
+- Recomenda exatamente {amount} músicas.
+- Não repitas artistas demasiadas vezes.
+- Mistura músicas muito conhecidas com algumas descobertas boas.
+- A playlist tem de começar forte.
+- Depois deve manter boa energia para tocar seguida.
+- Cada youtube_query tem de ser excelente para encontrar a música no YouTube.
+- estimated_seconds deve ser a duração aproximada da música em segundos.
 """
 
     try:
@@ -109,42 +146,52 @@ Formato obrigatório:
                 },
                 {
                     "role": "user",
-                    "content": user_profile
+                    "content": user_prompt
                 }
             ]
         )
 
         text = response.output_text.strip()
+        parsed = extract_json(text)
 
-        try:
-            parsed = json.loads(text)
-        except Exception:
-            start = text.find("{")
-            end = text.rfind("}") + 1
-            parsed = json.loads(text[start:end])
-
-        tracks = parsed.get("tracks", [])
-
+        raw_tracks = parsed.get("tracks", [])
         cleaned_tracks = []
+        used = set()
 
-        for track in tracks:
+        for track in raw_tracks:
             artist = str(track.get("artist", "")).strip()
             title = str(track.get("title", "")).strip()
             reason = str(track.get("reason", "")).strip()
-            vibe = str(track.get("vibe", "")).strip()
             youtube_query = str(track.get("youtube_query", "")).strip()
+            vibe = str(track.get("vibe", "")).strip()
+
+            try:
+                estimated_seconds = int(track.get("estimated_seconds", 240))
+            except Exception:
+                estimated_seconds = 240
+
+            estimated_seconds = max(120, min(estimated_seconds, 480))
+
+            if not artist or not title:
+                continue
+
+            key = f"{artist.lower()}---{title.lower()}"
+            if key in used:
+                continue
+
+            used.add(key)
 
             if not youtube_query:
                 youtube_query = f"{artist} {title} official music video"
 
-            if artist and title:
-                cleaned_tracks.append({
-                    "artist": artist,
-                    "title": title,
-                    "reason": reason or "Combina com o teu gosto musical.",
-                    "vibe": vibe or "boa vibe",
-                    "youtube_query": youtube_query
-                })
+            cleaned_tracks.append({
+                "artist": artist,
+                "title": title,
+                "reason": reason or "Combina com o teu gosto musical.",
+                "youtube_query": youtube_query,
+                "vibe": vibe or "boa vibe",
+                "estimated_seconds": estimated_seconds
+            })
 
         return jsonify({
             "ok": True,
