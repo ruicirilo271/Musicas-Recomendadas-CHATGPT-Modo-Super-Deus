@@ -22,6 +22,10 @@ const playlistName = document.getElementById("playlistName");
 const playlistDescription = document.getElementById("playlistDescription");
 const equalizer = document.getElementById("equalizer");
 
+const coverImg = document.getElementById("coverImg");
+const discFallback = document.getElementById("discFallback");
+const openYoutube = document.getElementById("openYoutube");
+
 let tracks = [];
 let currentIndex = 0;
 let isPlaying = false;
@@ -50,9 +54,26 @@ function youtubeSearchUrl(query) {
   return `https://www.youtube.com/results?search_query=${encodeQuery(query)}`;
 }
 
-function youtubeEmbedFromQuery(query, autoplay = true) {
-  const q = encodeQuery(query);
-  return `https://www.youtube.com/embed?listType=search&list=${q}&autoplay=${autoplay ? "1" : "0"}&controls=1&rel=0`;
+function youtubeEmbedFromId(videoId, autoplay = true) {
+  return `https://www.youtube.com/embed/${videoId}?autoplay=${autoplay ? "1" : "0"}&controls=1&rel=0&playsinline=1`;
+}
+
+async function getYouTubeVideo(query) {
+  const res = await fetch("/api/youtube/search", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ query })
+  });
+
+  const data = await res.json();
+
+  if (!data.ok) {
+    throw new Error(data.error || "Não foi possível encontrar vídeo no YouTube.");
+  }
+
+  return data;
 }
 
 function clearAutoTimer() {
@@ -77,6 +98,18 @@ function startAutoTimer(track) {
   }, safeSeconds * 1000);
 }
 
+function setCover(src) {
+  if (src) {
+    coverImg.src = src;
+    coverImg.style.display = "block";
+    discFallback.style.display = "none";
+  } else {
+    coverImg.src = "";
+    coverImg.style.display = "none";
+    discFallback.style.display = "flex";
+  }
+}
+
 function renderTracks() {
   tracksList.innerHTML = "";
 
@@ -93,6 +126,10 @@ function renderTracks() {
       item.classList.add("active");
     }
 
+    const videoBadge = track.videoId
+      ? `<span>vídeo encontrado</span>`
+      : `<span>ainda sem vídeo</span>`;
+
     item.innerHTML = `
       <div class="track-number">${String(index + 1).padStart(2, "0")}</div>
 
@@ -103,12 +140,13 @@ function renderTracks() {
         <div class="track-meta">
           <span>${escapeHtml(track.vibe || "boa vibe")}</span>
           <span>${Math.round((track.estimated_seconds || 240) / 60)} min aprox.</span>
+          ${videoBadge}
         </div>
       </div>
 
       <div class="track-actions">
         <button class="play-one">Play</button>
-        <a href="${youtubeSearchUrl(track.youtube_query)}" target="_blank">Abrir</a>
+        <a href="${youtubeSearchUrl(track.youtube_query)}" target="_blank">Pesquisar</a>
       </div>
     `;
 
@@ -120,7 +158,7 @@ function renderTracks() {
   });
 }
 
-function playTrack(index, continuePlaylist = true) {
+async function playTrack(index, continuePlaylist = true) {
   if (!tracks.length) {
     setStatus("Ainda não há músicas. Gera uma playlist primeiro.", "error");
     return;
@@ -139,20 +177,62 @@ function playTrack(index, continuePlaylist = true) {
   nowReason.textContent = track.reason || "Recomendação criada pelo ChatGPT.";
   nowVibe.textContent = track.vibe || "boa vibe";
 
-  youtubeFrame.src = youtubeEmbedFromQuery(track.youtube_query, true);
-
   equalizer.classList.add("playing");
-
   renderTracks();
 
-  setStatus(
-    continuePlaylist
-      ? `A tocar playlist seguida: ${track.artist} - ${track.title}`
-      : `A tocar música escolhida: ${track.artist} - ${track.title}`,
-    "ok"
-  );
+  setStatus(`A procurar vídeo no YouTube: ${track.artist} - ${track.title}`, "loading");
 
-  startAutoTimer(track);
+  try {
+    let yt = null;
+
+    if (track.videoId) {
+      yt = {
+        videoId: track.videoId,
+        title: track.youtubeTitle || "",
+        channelTitle: track.channelTitle || "",
+        thumbnail: track.thumbnail || "",
+        watchUrl: track.watchUrl || `https://www.youtube.com/watch?v=${track.videoId}`
+      };
+    } else {
+      yt = await getYouTubeVideo(track.youtube_query);
+
+      track.videoId = yt.videoId;
+      track.youtubeTitle = yt.title;
+      track.channelTitle = yt.channelTitle;
+      track.thumbnail = yt.thumbnail;
+      track.watchUrl = yt.watchUrl;
+    }
+
+    youtubeFrame.src = youtubeEmbedFromId(yt.videoId, true);
+    setCover(yt.thumbnail);
+
+    if (yt.watchUrl) {
+      openYoutube.href = yt.watchUrl;
+      openYoutube.style.display = "inline-flex";
+    } else {
+      openYoutube.style.display = "none";
+    }
+
+    setStatus(
+      continuePlaylist
+        ? `A tocar playlist seguida: ${track.artist} - ${track.title}`
+        : `A tocar música escolhida: ${track.artist} - ${track.title}`,
+      "ok"
+    );
+
+    renderTracks();
+    startAutoTimer(track);
+
+  } catch (err) {
+    console.error(err);
+    setStatus("Erro YouTube: " + err.message, "error");
+
+    if (continuePlaylist) {
+      setTimeout(() => {
+        nextTrack(true);
+      }, 2200);
+    }
+  }
 }
 
 function nextTrack(forcePlaylist = false) {
@@ -288,6 +368,7 @@ autoNextCheck.addEventListener("change", () => {
 
 window.addEventListener("load", () => {
   renderTracks();
+  setCover("");
 
   setTimeout(() => {
     generateRecommendations(true);

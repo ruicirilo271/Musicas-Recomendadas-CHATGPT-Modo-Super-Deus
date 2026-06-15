@@ -16,12 +16,12 @@
   <main class="app-shell">
 
     <section class="hero">
-      <div class="hero-badge">ChatGPT Music Engine</div>
+      <div class="hero-badge">ChatGPT + YouTube Music Engine</div>
 
-      <h1>Músicas Recomendadas</h1>
+      <h1>Music Super Deus</h1>
 
       <p>
-        Playlist criada pelo ChatGPT. Quando a aplicação abre, gera recomendações e tenta tocar as músicas seguidas.
+        O ChatGPT cria a playlist. A YouTube API encontra os vídeos reais. A aplicação toca as músicas seguidas.
       </p>
     </section>
 
@@ -73,7 +73,8 @@
       <div class="now-area">
 
         <div class="cover-box">
-          <div class="disc">
+          <img id="coverImg" src="" alt="">
+          <div id="discFallback" class="disc">
             <div class="disc-hole"></div>
           </div>
         </div>
@@ -117,6 +118,10 @@
           <input type="checkbox" id="autoNext" checked>
           Avançar automaticamente pela duração estimada
         </label>
+      </div>
+
+      <div class="open-youtube-box">
+        <a id="openYoutube" href="#" target="_blank">Abrir vídeo no YouTube</a>
       </div>
 
     </section>

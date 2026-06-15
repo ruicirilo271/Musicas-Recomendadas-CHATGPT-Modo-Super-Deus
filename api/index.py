@@ -3,6 +3,7 @@
 import os
 import json
 import re
+import requests
 from flask import Flask, render_template, jsonify, request
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -24,6 +25,7 @@ CORS(app)
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip()
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "").strip()
 
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
@@ -40,8 +42,9 @@ def extract_json(text):
         pass
 
     match = re.search(r"\{[\s\S]*\}", text)
+
     if not match:
-        raise ValueError("Não foi possível encontrar JSON válido na resposta.")
+        raise ValueError("Não foi possível encontrar JSON válido na resposta da OpenAI.")
 
     return json.loads(match.group(0))
 
@@ -55,8 +58,9 @@ def home():
 def health():
     return jsonify({
         "ok": True,
-        "app": "Músicas Recomendadas ChatGPT Super Deus",
+        "app": "ChatGPT Music Super Deus",
         "openai_key_ready": bool(OPENAI_API_KEY),
+        "youtube_key_ready": bool(YOUTUBE_API_KEY),
         "model": OPENAI_MODEL
     })
 
@@ -66,7 +70,7 @@ def recommendations():
     if not client:
         return jsonify({
             "ok": False,
-            "error": "OPENAI_API_KEY não encontrada. No Vercel coloca a variável de ambiente OPENAI_API_KEY."
+            "error": "OPENAI_API_KEY não encontrada. Coloca a chave da OpenAI no Vercel."
         }), 500
 
     data = request.get_json(silent=True) or {}
@@ -86,7 +90,7 @@ def recommendations():
 
     default_artists = "Adele, Rihanna, The Weeknd, Nininho Vaz Maia, Roberto Carlos, Boss AC, Matias Damásio"
     default_genres = "pop, kizomba, R&B, soul, música romântica, música portuguesa, afro pop"
-    default_mood = "músicas boas para ouvir seguidas, com vibe romântica, moderna e viciante"
+    default_mood = "músicas boas para ouvir seguidas, românticas, modernas, conhecidas e com boa vibe"
     default_language = "português, inglês, kizomba, pop, soul e R&B"
 
     system_prompt = """
@@ -118,9 +122,9 @@ Formato obrigatório:
 """
 
     user_prompt = f"""
-Cria uma playlist com {amount} músicas recomendadas.
+Cria uma playlist com exatamente {amount} músicas recomendadas.
 
-Preferências do utilizador:
+Preferências:
 - Estado de espírito: {mood or default_mood}
 - Artistas de referência: {artists or default_artists}
 - Géneros: {genres or default_genres}
@@ -128,8 +132,9 @@ Preferências do utilizador:
 
 Regras:
 - Recomenda exatamente {amount} músicas.
+- Não repitas a mesma música.
 - Não repitas artistas demasiadas vezes.
-- Mistura músicas muito conhecidas com algumas descobertas boas.
+- Mistura músicas conhecidas com algumas descobertas boas.
 - A playlist tem de começar forte.
 - Depois deve manter boa energia para tocar seguida.
 - Cada youtube_query tem de ser excelente para encontrar a música no YouTube.
@@ -176,6 +181,7 @@ Regras:
                 continue
 
             key = f"{artist.lower()}---{title.lower()}"
+
             if key in used:
                 continue
 
@@ -207,9 +213,99 @@ Regras:
         }), 500
 
 
+@app.route("/api/youtube/search", methods=["POST"])
+def youtube_search():
+    if not YOUTUBE_API_KEY:
+        return jsonify({
+            "ok": False,
+            "error": "YOUTUBE_API_KEY não encontrada. Coloca a chave do YouTube no Vercel."
+        }), 500
+
+    data = request.get_json(silent=True) or {}
+    query = str(data.get("query", "")).strip()
+
+    if not query:
+        return jsonify({
+            "ok": False,
+            "error": "Pesquisa vazia."
+        }), 400
+
+    try:
+        url = "https://www.googleapis.com/youtube/v3/search"
+
+        params = {
+            "key": YOUTUBE_API_KEY,
+            "part": "snippet",
+            "q": query,
+            "type": "video",
+            "videoEmbeddable": "true",
+            "maxResults": 5,
+            "safeSearch": "none"
+        }
+
+        r = requests.get(url, params=params, timeout=12)
+        result = r.json()
+
+        if r.status_code != 200:
+            return jsonify({
+                "ok": False,
+                "error": result.get("error", {}).get("message", "Erro na API do YouTube.")
+            }), 500
+
+        items = result.get("items", [])
+
+        if not items:
+            return jsonify({
+                "ok": False,
+                "error": "Nenhum vídeo encontrado no YouTube."
+            }), 404
+
+        best_item = None
+
+        for item in items:
+            video_id = item.get("id", {}).get("videoId")
+            if video_id:
+                best_item = item
+                break
+
+        if not best_item:
+            return jsonify({
+                "ok": False,
+                "error": "Nenhum videoId válido encontrado."
+            }), 404
+
+        video_id = best_item.get("id", {}).get("videoId")
+        snippet = best_item.get("snippet", {})
+        thumbs = snippet.get("thumbnails", {})
+
+        thumbnail = ""
+
+        if "high" in thumbs:
+            thumbnail = thumbs["high"].get("url", "")
+        elif "medium" in thumbs:
+            thumbnail = thumbs["medium"].get("url", "")
+        elif "default" in thumbs:
+            thumbnail = thumbs["default"].get("url", "")
+
+        return jsonify({
+            "ok": True,
+            "videoId": video_id,
+            "title": snippet.get("title", ""),
+            "channelTitle": snippet.get("channelTitle", ""),
+            "thumbnail": thumbnail,
+            "watchUrl": f"https://www.youtube.com/watch?v={video_id}"
+        })
+
+    except Exception as e:
+        return jsonify({
+            "ok": False,
+            "error": str(e)
+        }), 500
+
+
 if __name__ == "__main__":
     print("")
-    print("✨ Músicas Recomendadas ChatGPT Super Deus iniciado")
+    print("✨ ChatGPT Music Super Deus iniciado")
     print("🌐 Abre: http://127.0.0.1:5000")
     print("")
     app.run(host="127.0.0.1", port=5000, debug=True)
