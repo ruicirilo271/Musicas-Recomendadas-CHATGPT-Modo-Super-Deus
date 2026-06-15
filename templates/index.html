@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <meta charset="UTF-8">
+  <title>Músicas Recomendadas ChatGPT Super Deus</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+  <div class="bg-glow glow-1"></div>
+  <div class="bg-glow glow-2"></div>
+  <div class="bg-glow glow-3"></div>
+
+  <main class="app">
+
+    <section class="hero">
+      <div class="badge">IA Musical Super Deus</div>
+
+      <h1>Músicas Recomendadas pelo ChatGPT</h1>
+
+      <p>
+        A aplicação gera uma playlist com inteligência artificial e tenta tocar as músicas seguidas no YouTube.
+      </p>
+    </section>
+
+    <section class="controls-card">
+
+      <div class="grid">
+        <div class="field">
+          <label>Estado de espírito</label>
+          <input id="mood" placeholder="Ex: romântico, alegre, noite calma, energia..." value="romântico, moderno, boa vibe">
+        </div>
+
+        <div class="field">
+          <label>Artistas de referência</label>
+          <input id="artists" placeholder="Ex: Adele, Rihanna, Nininho..." value="Adele, Rihanna, The Weeknd, Nininho Vaz Maia, Roberto Carlos, Boss AC">
+        </div>
+
+        <div class="field">
+          <label>Géneros</label>
+          <input id="genres" placeholder="Ex: pop, kizomba, R&B..." value="pop, kizomba, R&B, soul, música portuguesa">
+        </div>
+
+        <div class="field">
+          <label>Número de músicas</label>
+          <select id="amount">
+            <option value="10">10 músicas</option>
+            <option value="20" selected>20 músicas</option>
+            <option value="30">30 músicas</option>
+            <option value="40">40 músicas</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="buttons">
+        <button id="generateBtn" class="main-btn">
+          Gerar playlist com ChatGPT
+        </button>
+
+        <button id="startBtn" class="ghost-btn">
+          Tocar seguidas
+        </button>
+
+        <button id="stopBtn" class="danger-btn">
+          Parar
+        </button>
+      </div>
+
+      <div id="status" class="status">
+        Pronto para gerar recomendações.
+      </div>
+
+    </section>
+
+    <section class="player-card">
+
+      <div class="now-playing">
+        <div>
+          <span class="small-title">A tocar agora</span>
+          <h2 id="nowTitle">Nenhuma música ainda</h2>
+          <p id="nowReason">Gera uma playlist para começar.</p>
+        </div>
+
+        <div class="equalizer" id="equalizer">
+          <span></span>
+          <span></span>
+          <span></span>
+          <span></span>
+          <span></span>
+        </div>
+      </div>
+
+      <div class="youtube-frame-wrap">
+        <iframe
+          id="youtubeFrame"
+          src=""
+          title="YouTube Player"
+          frameborder="0"
+          allow="autoplay; encrypted-media; picture-in-picture"
+          allowfullscreen>
+        </iframe>
+      </div>
+
+      <div class="player-buttons">
+        <button id="prevBtn">Anterior</button>
+        <button id="playCurrentBtn">Play atual</button>
+        <button id="nextBtn">Próxima</button>
+      </div>
+
+    </section>
+
+    <section class="playlist-card">
+      <div class="playlist-header">
+        <div>
+          <span class="small-title">Playlist IA</span>
+          <h2 id="playlistName">Ainda sem playlist</h2>
+        </div>
+        <p id="playlistDescription">As recomendações vão aparecer aqui.</p>
+      </div>
+
+      <div id="tracksList" class="tracks-list"></div>
+    </section>
+
+  </main>
+
+  <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
