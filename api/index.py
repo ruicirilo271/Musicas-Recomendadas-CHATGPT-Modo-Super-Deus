@@ -232,7 +232,7 @@ def login_youtube():
         "redirect_uri": get_redirect_uri(),
         "response_type": "code",
         "scope": YOUTUBE_SCOPE,
-        "access_type": "offline",
+       
         "include_granted_scopes": "true",
         "prompt": "consent",
         "state": state
