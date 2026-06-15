@@ -1,40 +1,109 @@
 const moodInput = document.getElementById("mood");
-const artistsInput = document.getElementById("artists");
 const genresInput = document.getElementById("genres");
 const amountInput = document.getElementById("amount");
 
+const loadLikesBtn = document.getElementById("loadLikesBtn");
 const generateBtn = document.getElementById("generateBtn");
 const playAllBtn = document.getElementById("playAllBtn");
 const stopBtn = document.getElementById("stopBtn");
 const prevBtn = document.getElementById("prevBtn");
 const nextBtn = document.getElementById("nextBtn");
 const playCurrentBtn = document.getElementById("playCurrentBtn");
-const autoNextCheck = document.getElementById("autoNext");
+const useEstimatedDuration = document.getElementById("useEstimatedDuration");
 
 const statusBox = document.getElementById("status");
-const youtubeFrame = document.getElementById("youtubeFrame");
+const likesStatus = document.getElementById("likesStatus");
 const tracksList = document.getElementById("tracksList");
+const likedVideosList = document.getElementById("likedVideosList");
 
 const nowTitle = document.getElementById("nowTitle");
 const nowReason = document.getElementById("nowReason");
 const nowVibe = document.getElementById("nowVibe");
 const playlistName = document.getElementById("playlistName");
 const playlistDescription = document.getElementById("playlistDescription");
+const tasteSummary = document.getElementById("tasteSummary");
 const equalizer = document.getElementById("equalizer");
 
 const coverImg = document.getElementById("coverImg");
 const discFallback = document.getElementById("discFallback");
 const openYoutube = document.getElementById("openYoutube");
 
+let likedVideos = [];
 let tracks = [];
 let currentIndex = 0;
 let isPlaying = false;
 let playlistMode = true;
 let autoTimer = null;
 
+let ytPlayer = null;
+let ytReady = false;
+let pendingVideoId = null;
+
+function onYouTubeIframeAPIReady() {
+  ytPlayer = new YT.Player("youtubePlayer", {
+    width: "100%",
+    height: "100%",
+    videoId: "",
+    playerVars: {
+      autoplay: 0,
+      controls: 1,
+      rel: 0,
+      playsinline: 1
+    },
+    events: {
+      onReady: () => {
+        ytReady = true;
+
+        if (pendingVideoId) {
+          loadVideoInPlayer(pendingVideoId);
+          pendingVideoId = null;
+        }
+      },
+      onStateChange: onPlayerStateChange
+    }
+  });
+}
+
+function onPlayerStateChange(event) {
+  if (event.data === YT.PlayerState.ENDED) {
+    clearAutoTimer();
+
+    if (playlistMode && tracks.length) {
+      setStatus("Música terminou. A avançar para a próxima...", "ok");
+
+      setTimeout(() => {
+        nextTrack(true);
+      }, 700);
+    }
+  }
+
+  if (event.data === YT.PlayerState.PLAYING) {
+    equalizer.classList.add("playing");
+    isPlaying = true;
+  }
+
+  if (event.data === YT.PlayerState.PAUSED) {
+    equalizer.classList.remove("playing");
+  }
+}
+
+function loadVideoInPlayer(videoId) {
+  if (!ytReady || !ytPlayer) {
+    pendingVideoId = videoId;
+    return;
+  }
+
+  ytPlayer.loadVideoById(videoId);
+}
+
 function setStatus(text, type = "") {
   statusBox.textContent = text;
   statusBox.className = "status " + type;
+}
+
+function setLikesStatus(text, type = "") {
+  likesStatus.textContent = text;
+  likesStatus.className = "mini-status " + type;
 }
 
 function escapeHtml(text) {
@@ -52,10 +121,6 @@ function encodeQuery(query) {
 
 function youtubeSearchUrl(query) {
   return `https://www.youtube.com/results?search_query=${encodeQuery(query)}`;
-}
-
-function youtubeEmbedFromId(videoId, autoplay = true) {
-  return `https://www.youtube.com/embed/${videoId}?autoplay=${autoplay ? "1" : "0"}&controls=1&rel=0&playsinline=1`;
 }
 
 async function getYouTubeVideo(query) {
@@ -83,10 +148,10 @@ function clearAutoTimer() {
   }
 }
 
-function startAutoTimer(track) {
+function startEstimatedTimer(track) {
   clearAutoTimer();
 
-  if (!autoNextCheck.checked) return;
+  if (!useEstimatedDuration.checked) return;
   if (!playlistMode) return;
   if (!track) return;
 
@@ -108,6 +173,31 @@ function setCover(src) {
     coverImg.style.display = "none";
     discFallback.style.display = "flex";
   }
+}
+
+function renderLikedVideos() {
+  likedVideosList.innerHTML = "";
+
+  if (!likedVideos.length) {
+    likedVideosList.innerHTML = `<div class="empty">Ainda não carregaste os vídeos gostados.</div>`;
+    return;
+  }
+
+  likedVideos.slice(0, 12).forEach((video) => {
+    const item = document.createElement("div");
+    item.className = "liked-card";
+
+    item.innerHTML = `
+      <img src="${escapeHtml(video.thumbnail || "")}" alt="">
+      <div>
+        <h4>${escapeHtml(video.title)}</h4>
+        <p>${escapeHtml(video.channelTitle)}</p>
+      </div>
+      <a href="${escapeHtml(video.watchUrl)}" target="_blank">Abrir</a>
+    `;
+
+    likedVideosList.appendChild(item);
+  });
 }
 
 function renderTracks() {
@@ -158,6 +248,98 @@ function renderTracks() {
   });
 }
 
+async function loadLikedVideos() {
+  setLikesStatus("A carregar vídeos que deste like no YouTube...", "loading");
+
+  try {
+    const res = await fetch("/api/youtube/liked?max=50");
+    const data = await res.json();
+
+    if (!data.ok) {
+      if (data.login_required) {
+        setLikesStatus("Tens de entrar com o YouTube primeiro.", "error");
+        return;
+      }
+
+      throw new Error(data.error || "Erro ao carregar likes.");
+    }
+
+    likedVideos = data.videos || [];
+
+    renderLikedVideos();
+
+    setLikesStatus(`Carreguei ${likedVideos.length} vídeos gostados do YouTube.`, "ok");
+
+  } catch (err) {
+    console.error(err);
+    setLikesStatus("Erro: " + err.message, "error");
+  }
+}
+
+async function generateRecommendations(autoStart = true) {
+  clearAutoTimer();
+
+  generateBtn.disabled = true;
+  playAllBtn.disabled = true;
+
+  setStatus("A pedir recomendações ao ChatGPT com base nos teus likes...", "loading");
+
+  try {
+    if (!likedVideos.length) {
+      await loadLikedVideos();
+    }
+
+    const payload = {
+      mood: moodInput.value,
+      genres: genresInput.value,
+      amount: amountInput.value,
+      liked_videos: likedVideos
+    };
+
+    const res = await fetch("/api/recommendations", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const data = await res.json();
+
+    if (!data.ok) {
+      throw new Error(data.error || "Erro ao gerar recomendações.");
+    }
+
+    tracks = Array.isArray(data.tracks) ? data.tracks : [];
+    currentIndex = 0;
+    playlistMode = true;
+
+    playlistName.textContent = data.playlist_name || "Playlist Super Deus";
+    playlistDescription.textContent = data.description || "Músicas recomendadas pelo ChatGPT com base nos teus likes.";
+    tasteSummary.textContent = data.taste_summary || "";
+
+    renderTracks();
+
+    if (!tracks.length) {
+      setStatus("O ChatGPT não devolveu músicas. Tenta novamente.", "error");
+      return;
+    }
+
+    setStatus(`Playlist criada com ${tracks.length} músicas baseadas nos teus likes.`, "ok");
+
+    if (autoStart) {
+      playTrack(0, true);
+    }
+
+  } catch (err) {
+    console.error(err);
+    setStatus("Erro: " + err.message, "error");
+  } finally {
+    generateBtn.disabled = false;
+    playAllBtn.disabled = false;
+  }
+}
+
 async function playTrack(index, continuePlaylist = true) {
   if (!tracks.length) {
     setStatus("Ainda não há músicas. Gera uma playlist primeiro.", "error");
@@ -166,6 +348,8 @@ async function playTrack(index, continuePlaylist = true) {
 
   if (index < 0) index = tracks.length - 1;
   if (index >= tracks.length) index = 0;
+
+  clearAutoTimer();
 
   currentIndex = index;
   playlistMode = continuePlaylist;
@@ -203,7 +387,7 @@ async function playTrack(index, continuePlaylist = true) {
       track.watchUrl = yt.watchUrl;
     }
 
-    youtubeFrame.src = youtubeEmbedFromId(yt.videoId, true);
+    loadVideoInPlayer(yt.videoId);
     setCover(yt.thumbnail);
 
     if (yt.watchUrl) {
@@ -221,7 +405,10 @@ async function playTrack(index, continuePlaylist = true) {
     );
 
     renderTracks();
-    startAutoTimer(track);
+
+    if (useEstimatedDuration.checked) {
+      startEstimatedTimer(track);
+    }
 
   } catch (err) {
     console.error(err);
@@ -253,7 +440,10 @@ function prevTrack() {
 function stopPlayer() {
   clearAutoTimer();
 
-  youtubeFrame.src = "";
+  if (ytPlayer && ytReady) {
+    ytPlayer.stopVideo();
+  }
+
   isPlaying = false;
   playlistMode = false;
 
@@ -262,64 +452,9 @@ function stopPlayer() {
   setStatus("Player parado.", "");
 }
 
-async function generateRecommendations(autoStart = true) {
-  clearAutoTimer();
-
-  generateBtn.disabled = true;
-  playAllBtn.disabled = true;
-
-  setStatus("A pedir recomendações ao ChatGPT...", "loading");
-
-  try {
-    const payload = {
-      mood: moodInput.value,
-      artists: artistsInput.value,
-      genres: genresInput.value,
-      amount: amountInput.value
-    };
-
-    const res = await fetch("/api/recommendations", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(payload)
-    });
-
-    const data = await res.json();
-
-    if (!data.ok) {
-      throw new Error(data.error || "Erro ao gerar recomendações.");
-    }
-
-    tracks = Array.isArray(data.tracks) ? data.tracks : [];
-    currentIndex = 0;
-    playlistMode = true;
-
-    playlistName.textContent = data.playlist_name || "Playlist Super Deus";
-    playlistDescription.textContent = data.description || "Músicas recomendadas pelo ChatGPT.";
-
-    renderTracks();
-
-    if (!tracks.length) {
-      setStatus("O ChatGPT não devolveu músicas. Tenta gerar novamente.", "error");
-      return;
-    }
-
-    setStatus(`Playlist criada com ${tracks.length} músicas.`, "ok");
-
-    if (autoStart) {
-      playTrack(0, true);
-    }
-
-  } catch (err) {
-    console.error(err);
-    setStatus("Erro: " + err.message, "error");
-  } finally {
-    generateBtn.disabled = false;
-    playAllBtn.disabled = false;
-  }
-}
+loadLikesBtn.addEventListener("click", () => {
+  loadLikedVideos();
+});
 
 generateBtn.addEventListener("click", () => {
   generateRecommendations(true);
@@ -355,22 +490,22 @@ playCurrentBtn.addEventListener("click", () => {
   playTrack(currentIndex, true);
 });
 
-autoNextCheck.addEventListener("change", () => {
+useEstimatedDuration.addEventListener("change", () => {
   clearAutoTimer();
 
-  if (autoNextCheck.checked && isPlaying && tracks[currentIndex]) {
-    startAutoTimer(tracks[currentIndex]);
-    setStatus("Avanço automático ativado.", "ok");
+  if (useEstimatedDuration.checked && isPlaying && tracks[currentIndex]) {
+    startEstimatedTimer(tracks[currentIndex]);
+    setStatus("Modo duração estimada ativado.", "ok");
   } else {
-    setStatus("Avanço automático desativado.", "");
+    setStatus("Modo fim real do vídeo ativado. A música vai até ao fim e depois avança.", "ok");
   }
 });
 
 window.addEventListener("load", () => {
   renderTracks();
+  renderLikedVideos();
   setCover("");
+  openYoutube.style.display = "none";
 
-  setTimeout(() => {
-    generateRecommendations(true);
-  }, 700);
+  setStatus("Entra com o YouTube e carrega os teus likes para gerar recomendações.", "");
 });
