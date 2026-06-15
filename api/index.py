@@ -3,6 +3,7 @@
 import os
 import json
 import re
+import time
 import secrets
 import requests
 
@@ -13,6 +14,9 @@ from openai import OpenAI
 
 load_dotenv()
 
+# -------------------------------------------------------
+# Caminhos corretos para Vercel e PC
+# -------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(BASE_DIR)
 
@@ -23,10 +27,23 @@ app = Flask(
     static_url_path="/static"
 )
 
+# -------------------------------------------------------
+# Configuração de sessão para OAuth no Vercel
+# -------------------------------------------------------
+SECRET_KEY = os.getenv("SECRET_KEY", "troca-esta-chave-super-deus-123456789")
+app.secret_key = SECRET_KEY
+
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=True
+)
+
 CORS(app)
 
-app.secret_key = os.getenv("SECRET_KEY", "troca-esta-chave-super-deus")
-
+# -------------------------------------------------------
+# Variáveis de ambiente
+# -------------------------------------------------------
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip()
 
@@ -37,12 +54,14 @@ YOUTUBE_REDIRECT_URI = os.getenv("YOUTUBE_REDIRECT_URI", "").strip()
 
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
-
 YOUTUBE_SCOPE = "https://www.googleapis.com/auth/youtube.readonly"
 
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 
+# -------------------------------------------------------
+# Helpers
+# -------------------------------------------------------
 def extract_json(text):
     if not text:
         raise ValueError("Resposta vazia da OpenAI.")
@@ -68,12 +87,13 @@ def get_base_url():
 
     host = request.headers.get("X-Forwarded-Host", request.host)
     proto = request.headers.get("X-Forwarded-Proto", request.scheme)
+
     return f"{proto}://{host}".rstrip("/")
 
 
 def get_redirect_uri():
     if YOUTUBE_REDIRECT_URI:
-        return YOUTUBE_REDIRECT_URI
+        return YOUTUBE_REDIRECT_URI.rstrip("/")
 
     return f"{get_base_url()}/oauth2callback"
 
@@ -90,11 +110,95 @@ def youtube_headers():
     }
 
 
+def get_thumbnail(snippet):
+    thumbs = snippet.get("thumbnails", {}) or {}
+
+    if "maxres" in thumbs:
+        return thumbs["maxres"].get("url", "")
+
+    if "high" in thumbs:
+        return thumbs["high"].get("url", "")
+
+    if "medium" in thumbs:
+        return thumbs["medium"].get("url", "")
+
+    if "default" in thumbs:
+        return thumbs["default"].get("url", "")
+
+    return ""
+
+
+def refresh_youtube_token_if_needed():
+    refresh_token = session.get("youtube_refresh_token", "")
+
+    if not refresh_token:
+        return False
+
+    try:
+        data = {
+            "client_id": YOUTUBE_CLIENT_ID,
+            "client_secret": YOUTUBE_CLIENT_SECRET,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token"
+        }
+
+        r = requests.post(GOOGLE_TOKEN_URL, data=data, timeout=15)
+        token_data = r.json()
+
+        if r.status_code != 200:
+            return False
+
+        new_access_token = token_data.get("access_token", "")
+
+        if new_access_token:
+            session["youtube_access_token"] = new_access_token
+            session["youtube_token_time"] = int(time.time())
+            return True
+
+        return False
+
+    except Exception:
+        return False
+
+
+def youtube_get_with_auth(url, params):
+    headers = youtube_headers()
+
+    if not headers:
+        return None, {
+            "ok": False,
+            "login_required": True,
+            "error": "Tens de iniciar sessão com o YouTube primeiro."
+        }, 401
+
+    r = requests.get(url, headers=headers, params=params, timeout=15)
+
+    if r.status_code == 401:
+        refreshed = refresh_youtube_token_if_needed()
+
+        if refreshed:
+            headers = youtube_headers()
+            r = requests.get(url, headers=headers, params=params, timeout=15)
+
+    try:
+        data = r.json()
+    except Exception:
+        data = {}
+
+    return r, data, r.status_code
+
+
+# -------------------------------------------------------
+# Página principal
+# -------------------------------------------------------
 @app.route("/")
 def home():
     return render_template("index.html")
 
 
+# -------------------------------------------------------
+# Diagnóstico
+# -------------------------------------------------------
 @app.route("/api/health")
 def health():
     return jsonify({
@@ -103,11 +207,15 @@ def health():
         "openai_key_ready": bool(OPENAI_API_KEY),
         "youtube_api_key_ready": bool(YOUTUBE_API_KEY),
         "youtube_oauth_ready": bool(YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET),
+        "youtube_redirect_uri": get_redirect_uri(),
         "youtube_logged_in": bool(session.get("youtube_access_token")),
         "model": OPENAI_MODEL
     })
 
 
+# -------------------------------------------------------
+# Login YouTube OAuth
+# -------------------------------------------------------
 @app.route("/login-youtube")
 def login_youtube():
     if not YOUTUBE_CLIENT_ID or not YOUTUBE_CLIENT_SECRET:
@@ -130,8 +238,9 @@ def login_youtube():
         "state": state
     }
 
-    url = GOOGLE_AUTH_URL + "?" + requests.compat.urlencode(params)
-    return redirect(url)
+    auth_url = GOOGLE_AUTH_URL + "?" + requests.compat.urlencode(params)
+
+    return redirect(auth_url)
 
 
 @app.route("/oauth2callback")
@@ -139,18 +248,33 @@ def oauth2callback():
     error = request.args.get("error", "")
 
     if error:
-        return f"Erro no login Google: {error}", 400
+        return f"""
+        <h1>Erro no login Google</h1>
+        <p>{error}</p>
+        <p><a href="/">Voltar</a></p>
+        """, 400
 
     state = request.args.get("state", "")
     code = request.args.get("code", "")
 
-    if not state or state != session.get("oauth_state"):
-        return "Estado OAuth inválido.", 400
+    saved_state = session.get("oauth_state", "")
+
+    if not state or not saved_state or state != saved_state:
+        return """
+        <h1>Estado OAuth inválido</h1>
+        <p>Isto normalmente acontece quando a sessão/cookie não foi guardada.</p>
+        <p>Confirma SECRET_KEY no Vercel e faz Redeploy.</p>
+        <p><a href="/">Voltar</a></p>
+        """, 400
 
     if not code:
-        return "Código OAuth não recebido.", 400
+        return """
+        <h1>Código OAuth não recebido</h1>
+        <p>O Google não devolveu o código de autorização.</p>
+        <p><a href="/">Voltar</a></p>
+        """, 400
 
-    data = {
+    token_payload = {
         "code": code,
         "client_id": YOUTUBE_CLIENT_ID,
         "client_secret": YOUTUBE_CLIENT_SECRET,
@@ -159,20 +283,48 @@ def oauth2callback():
     }
 
     try:
-        r = requests.post(GOOGLE_TOKEN_URL, data=data, timeout=15)
+        r = requests.post(GOOGLE_TOKEN_URL, data=token_payload, timeout=15)
         token_data = r.json()
 
         if r.status_code != 200:
-            return f"Erro ao obter token: {token_data}", 500
+            return f"""
+            <h1>Erro ao obter token do Google</h1>
+            <pre>{json.dumps(token_data, indent=2, ensure_ascii=False)}</pre>
+            <p>Confirma se o Authorized redirect URI no Google Cloud é exatamente:</p>
+            <pre>{get_redirect_uri()}</pre>
+            <p><a href="/">Voltar</a></p>
+            """, 500
 
-        session["youtube_access_token"] = token_data.get("access_token", "")
-        session["youtube_refresh_token"] = token_data.get("refresh_token", "")
-        session["youtube_token_type"] = token_data.get("token_type", "Bearer")
+        access_token = token_data.get("access_token", "")
+        refresh_token = token_data.get("refresh_token", "")
+        token_type = token_data.get("token_type", "Bearer")
+        expires_in = token_data.get("expires_in", 3600)
+
+        if not access_token:
+            return """
+            <h1>Token inválido</h1>
+            <p>O Google não devolveu access_token.</p>
+            <p><a href="/">Voltar</a></p>
+            """, 500
+
+        session["youtube_access_token"] = access_token
+        session["youtube_token_type"] = token_type
+        session["youtube_token_time"] = int(time.time())
+        session["youtube_expires_in"] = expires_in
+
+        if refresh_token:
+            session["youtube_refresh_token"] = refresh_token
+
+        session.pop("oauth_state", None)
 
         return redirect("/")
 
     except Exception as e:
-        return f"Erro OAuth: {str(e)}", 500
+        return f"""
+        <h1>Erro OAuth</h1>
+        <pre>{str(e)}</pre>
+        <p><a href="/">Voltar</a></p>
+        """, 500
 
 
 @app.route("/logout-youtube")
@@ -180,21 +332,18 @@ def logout_youtube():
     session.pop("youtube_access_token", None)
     session.pop("youtube_refresh_token", None)
     session.pop("youtube_token_type", None)
+    session.pop("youtube_token_time", None)
+    session.pop("youtube_expires_in", None)
     session.pop("oauth_state", None)
+
     return redirect("/")
 
 
+# -------------------------------------------------------
+# Buscar vídeos com like do YouTube
+# -------------------------------------------------------
 @app.route("/api/youtube/liked", methods=["GET"])
 def youtube_liked():
-    headers = youtube_headers()
-
-    if not headers:
-        return jsonify({
-            "ok": False,
-            "login_required": True,
-            "error": "Tens de iniciar sessão com o YouTube primeiro."
-        }), 401
-
     try:
         max_results = int(request.args.get("max", 50))
     except Exception:
@@ -205,39 +354,34 @@ def youtube_liked():
     url = "https://www.googleapis.com/youtube/v3/videos"
 
     params = {
-        "part": "snippet,contentDetails",
+        "part": "snippet,contentDetails,status",
         "myRating": "like",
         "maxResults": max_results
     }
 
     try:
-        r = requests.get(url, headers=headers, params=params, timeout=15)
-        data = r.json()
+        r, data, status_code = youtube_get_with_auth(url, params)
 
-        if r.status_code != 200:
+        if r is None:
+            return jsonify(data), status_code
+
+        if status_code != 200:
             return jsonify({
                 "ok": False,
-                "error": data.get("error", {}).get("message", "Erro ao buscar vídeos gostados.")
-            }), r.status_code
+                "error": data.get("error", {}).get("message", "Erro ao buscar vídeos gostados."),
+                "raw": data
+            }), status_code
 
         videos = []
 
         for item in data.get("items", []):
-            snippet = item.get("snippet", {})
+            snippet = item.get("snippet", {}) or {}
+            status = item.get("status", {}) or {}
             video_id = item.get("id", "")
 
             title = snippet.get("title", "")
             channel = snippet.get("channelTitle", "")
-
-            thumbs = snippet.get("thumbnails", {})
-            thumbnail = ""
-
-            if "high" in thumbs:
-                thumbnail = thumbs["high"].get("url", "")
-            elif "medium" in thumbs:
-                thumbnail = thumbs["medium"].get("url", "")
-            elif "default" in thumbs:
-                thumbnail = thumbs["default"].get("url", "")
+            thumbnail = get_thumbnail(snippet)
 
             videos.append({
                 "videoId": video_id,
@@ -245,6 +389,8 @@ def youtube_liked():
                 "channelTitle": channel,
                 "thumbnail": thumbnail,
                 "watchUrl": f"https://www.youtube.com/watch?v={video_id}",
+                "embeddable": status.get("embeddable", None),
+                "privacyStatus": status.get("privacyStatus", ""),
                 "text": f"{title} - {channel}"
             })
 
@@ -261,6 +407,9 @@ def youtube_liked():
         }), 500
 
 
+# -------------------------------------------------------
+# ChatGPT recomenda músicas com base nos likes
+# -------------------------------------------------------
 @app.route("/api/recommendations", methods=["POST"])
 def recommendations():
     if not client:
@@ -306,7 +455,7 @@ def recommendations():
 És um especialista mundial em recomendações musicais.
 
 Tens de analisar vídeos gostados no YouTube e perceber o gosto musical do utilizador.
-Deves recomendar músicas reais e boas para tocar numa playlist.
+Deves recomendar músicas reais, populares e boas para tocar numa playlist.
 
 Tens de devolver APENAS JSON válido.
 Não uses Markdown.
@@ -325,7 +474,7 @@ Formato obrigatório:
       "artist": "Nome do artista",
       "title": "Nome da música",
       "reason": "Motivo curto ligado aos vídeos gostados",
-      "youtube_query": "Nome do artista Nome da música official music video",
+      "youtube_query": "Nome do artista Nome da música official audio",
       "vibe": "romântica / energia / calma / kizomba / pop / R&B / etc",
       "estimated_seconds": 240
     }
@@ -346,12 +495,12 @@ Preferências adicionais:
 
 Regras:
 - Baseia as recomendações nos vídeos gostados.
-- Recomenda exatamente {amount} músicas.
+- Recomenda exatamente {amount} músicas reais.
 - Não repitas a mesma música.
-- Não recomendes apenas os mesmos vídeos gostados; recomenda músicas parecidas também.
+- Não recomendes apenas os mesmos vídeos gostados; recomenda também músicas parecidas.
 - Mistura músicas conhecidas com descobertas boas.
 - A playlist deve começar forte e depois manter boa energia.
-- Cada youtube_query deve encontrar muito bem a música no YouTube.
+- A youtube_query deve preferir official audio, lyric video ou topic, porque costumam funcionar melhor em embed.
 - estimated_seconds deve ser a duração aproximada da música em segundos.
 """
 
@@ -381,7 +530,6 @@ Regras:
             artist = str(track.get("artist", "")).strip()
             title = str(track.get("title", "")).strip()
             reason = str(track.get("reason", "")).strip()
-            youtube_query = str(track.get("youtube_query", "")).strip()
             vibe = str(track.get("vibe", "")).strip()
 
             try:
@@ -401,8 +549,7 @@ Regras:
 
             used.add(key)
 
-            if not youtube_query:
-                youtube_query = f"{artist} {title} official music video"
+            youtube_query = f"{artist} {title} official audio"
 
             cleaned_tracks.append({
                 "artist": artist,
@@ -416,8 +563,14 @@ Regras:
         return jsonify({
             "ok": True,
             "playlist_name": parsed.get("playlist_name", "Playlist Super Deus"),
-            "description": parsed.get("description", "Músicas recomendadas pelo ChatGPT com base nos teus likes do YouTube."),
-            "taste_summary": parsed.get("taste_summary", "Gosto musical analisado com base nos vídeos gostados."),
+            "description": parsed.get(
+                "description",
+                "Músicas recomendadas pelo ChatGPT com base nos teus likes do YouTube."
+            ),
+            "taste_summary": parsed.get(
+                "taste_summary",
+                "Gosto musical analisado com base nos vídeos gostados."
+            ),
             "tracks": cleaned_tracks
         })
 
@@ -428,6 +581,9 @@ Regras:
         }), 500
 
 
+# -------------------------------------------------------
+# Pesquisar vídeo tocável no YouTube
+# -------------------------------------------------------
 @app.route("/api/youtube/search", methods=["POST"])
 def youtube_search():
     if not YOUTUBE_API_KEY:
@@ -446,68 +602,154 @@ def youtube_search():
         }), 400
 
     try:
-        url = "https://www.googleapis.com/youtube/v3/search"
+        search_url = "https://www.googleapis.com/youtube/v3/search"
 
-        params = {
-            "key": YOUTUBE_API_KEY,
-            "part": "snippet",
-            "q": query,
-            "type": "video",
-            "videoEmbeddable": "true",
-            "maxResults": 5,
-            "safeSearch": "none"
-        }
+        query_variants = [
+            query,
+            query.replace("official music video", "official audio"),
+            query.replace("official video", "official audio"),
+            query + " official audio",
+            query + " lyric video",
+            query + " topic"
+        ]
 
-        r = requests.get(url, params=params, timeout=12)
-        result = r.json()
+        seen_queries = []
+        all_video_ids = []
 
-        if r.status_code != 200:
-            return jsonify({
-                "ok": False,
-                "error": result.get("error", {}).get("message", "Erro na API do YouTube.")
-            }), 500
+        for q in query_variants:
+            q = " ".join(q.split())
 
-        items = result.get("items", [])
+            if not q or q.lower() in seen_queries:
+                continue
 
-        if not items:
+            seen_queries.append(q.lower())
+
+            search_params = {
+                "key": YOUTUBE_API_KEY,
+                "part": "snippet",
+                "q": q,
+                "type": "video",
+                "videoEmbeddable": "true",
+                "videoSyndicated": "true",
+                "maxResults": 10,
+                "safeSearch": "none",
+                "order": "relevance"
+            }
+
+            search_response = requests.get(search_url, params=search_params, timeout=12)
+            search_data = search_response.json()
+
+            if search_response.status_code != 200:
+                continue
+
+            for item in search_data.get("items", []):
+                video_id = item.get("id", {}).get("videoId")
+
+                if video_id and video_id not in all_video_ids:
+                    all_video_ids.append(video_id)
+
+            if len(all_video_ids) >= 15:
+                break
+
+        if not all_video_ids:
             return jsonify({
                 "ok": False,
                 "error": "Nenhum vídeo encontrado no YouTube."
             }), 404
 
-        best_item = None
+        videos_url = "https://www.googleapis.com/youtube/v3/videos"
 
-        for item in items:
-            video_id = item.get("id", {}).get("videoId")
-            if video_id:
-                best_item = item
-                break
+        videos_params = {
+            "key": YOUTUBE_API_KEY,
+            "part": "snippet,status,contentDetails",
+            "id": ",".join(all_video_ids[:50])
+        }
 
-        if not best_item:
+        videos_response = requests.get(videos_url, params=videos_params, timeout=12)
+        videos_data = videos_response.json()
+
+        if videos_response.status_code != 200:
             return jsonify({
                 "ok": False,
-                "error": "Nenhum videoId válido encontrado."
+                "error": videos_data.get("error", {}).get("message", "Erro ao validar vídeos do YouTube."),
+                "raw": videos_data
+            }), 500
+
+        valid_videos = []
+
+        for item in videos_data.get("items", []):
+            status = item.get("status", {}) or {}
+            snippet = item.get("snippet", {}) or {}
+            video_id = item.get("id", "")
+
+            embeddable = status.get("embeddable", False)
+            privacy_status = status.get("privacyStatus", "")
+
+            if not video_id:
+                continue
+
+            if privacy_status != "public":
+                continue
+
+            if not embeddable:
+                continue
+
+            title = snippet.get("title", "").lower()
+            channel = snippet.get("channelTitle", "").lower()
+
+            score = 0
+
+            if "official audio" in title:
+                score += 10
+
+            if "lyric" in title:
+                score += 6
+
+            if "topic" in channel:
+                score += 5
+
+            if "official" in title:
+                score += 4
+
+            if "live" in title:
+                score -= 4
+
+            if "cover" in title:
+                score -= 5
+
+            if "karaoke" in title:
+                score -= 8
+
+            if "reaction" in title:
+                score -= 8
+
+            if "remix" in title and "remix" not in query.lower():
+                score -= 3
+
+            valid_videos.append({
+                "score": score,
+                "item": item
+            })
+
+        if not valid_videos:
+            return jsonify({
+                "ok": False,
+                "error": "Encontrei vídeos, mas nenhum parece poder tocar incorporado na aplicação."
             }), 404
 
-        video_id = best_item.get("id", {}).get("videoId")
-        snippet = best_item.get("snippet", {})
-        thumbs = snippet.get("thumbnails", {})
+        valid_videos.sort(key=lambda x: x["score"], reverse=True)
 
-        thumbnail = ""
+        best = valid_videos[0]["item"]
 
-        if "high" in thumbs:
-            thumbnail = thumbs["high"].get("url", "")
-        elif "medium" in thumbs:
-            thumbnail = thumbs["medium"].get("url", "")
-        elif "default" in thumbs:
-            thumbnail = thumbs["default"].get("url", "")
+        video_id = best.get("id", "")
+        snippet = best.get("snippet", {}) or {}
 
         return jsonify({
             "ok": True,
             "videoId": video_id,
             "title": snippet.get("title", ""),
             "channelTitle": snippet.get("channelTitle", ""),
-            "thumbnail": thumbnail,
+            "thumbnail": get_thumbnail(snippet),
             "watchUrl": f"https://www.youtube.com/watch?v={video_id}"
         })
 
@@ -518,6 +760,9 @@ def youtube_search():
         }), 500
 
 
+# -------------------------------------------------------
+# Execução local
+# -------------------------------------------------------
 if __name__ == "__main__":
     print("")
     print("✨ ChatGPT Music Super Deus iniciado")
